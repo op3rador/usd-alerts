@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 # ============ CONFIGURA AQUÍ ============
 TOKEN = "8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y"          # ← pon tu token real
-CHAT_ID = "1669799682"                        # ← pon tu chat id real
+CHAT_ID = "1669799682"                 # ← pon tu chat id real
 ALERT_MINUTES = 30
 MOVE_THRESHOLD_EUR = 0.15
 MOVE_THRESHOLD_XAU = 0.20
@@ -19,6 +19,12 @@ URL_XAU = "https://biquote.io/api/XAUUSD"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+# ============ CONTROL DE RATE LIMIT ============
+last_calendar_fetch = 0
+CALENDAR_CACHE_SECONDS = 300      # Solo pide el calendario cada 5 minutos
+RATE_LIMIT_WAIT = 600             # Cuando hay 429 espera 10 minutos
+events_cache = []
 
 sent_pre = set()
 sent_signal = set()
@@ -91,30 +97,38 @@ print("Esperando eventos...")
 
 while True:
     try:
-        r = requests.get(URL_CAL, timeout=15, headers=HEADERS)
+        now_ts = time.time()
 
-        # Protección contra errores y rate limit
-        if r.status_code != 200:
-            print(f"Calendario status {r.status_code}")
+        # Solo pedimos el calendario cada 5 minutos (o si no hay caché)
+        if now_ts - last_calendar_fetch > CALENDAR_CACHE_SECONDS or not events_cache:
+            r = requests.get(URL_CAL, timeout=15, headers=HEADERS)
+
             if r.status_code == 429:
-                print("Rate limit (429). Esperando 3 minutos...")
-                time.sleep(180)
-            else:
+                print("Rate limit (429). Esperando 10 minutos...")
+                time.sleep(RATE_LIMIT_WAIT)
+                continue
+
+            if r.status_code != 200:
+                print(f"Calendario status {r.status_code}")
                 time.sleep(90)
-            continue
+                continue
 
-        if not r.text.strip():
-            print("Calendario devolvió respuesta vacía. Esperando...")
-            time.sleep(90)
-            continue
+            if not r.text.strip():
+                print("Calendario devolvió respuesta vacía")
+                time.sleep(90)
+                continue
 
-        try:
-            events = r.json()
-        except Exception as e:
-            print(f"Error parseando JSON del calendario: {e}")
-            print("Respuesta (primeros 200 chars):", r.text[:200])
-            time.sleep(90)
-            continue
+            try:
+                events_cache = r.json()
+                last_calendar_fetch = now_ts
+                print(f"Calendario actualizado → {len(events_cache)} eventos")
+            except Exception as e:
+                print(f"Error parseando JSON del calendario: {e}")
+                print("Respuesta recibida (primeros 200 chars):", r.text[:200])
+                time.sleep(90)
+                continue
+
+        events = events_cache   # Siempre usamos la caché
 
         now = datetime.now(timezone.utc)
 
@@ -141,7 +155,6 @@ while True:
             if 0 < mins <= ALERT_MINUTES and key not in sent_pre:
                 impact_emoji = "🔴" if impact == "High" else "🟠"
                 impact_text = "HIGH IMPACT" if impact == "High" else "MEDIUM IMPACT"
-
                 send(
                     f"{impact_emoji} <b>USD {impact_text} en {int(mins)} min</b>\n"
                     f"📌 {title}\n"
@@ -155,7 +168,6 @@ while True:
             # ---------- MONITOREO POST-NOTICIA ----------
             mins_after = -mins
             if CHECK_AFTER_MIN <= mins_after <= CHECK_WINDOW:
-
                 if key not in price_at_event:
                     eur = get_eurusd()
                     xau = get_xauusd()
@@ -200,7 +212,6 @@ while True:
                             sesgo = "VENTA USD / COMPRA EURUSD"
                             emoji = "🔴"
                             texto = f"EUR/USD subió <b>+{change_eur:.2f}%</b> → negativo para el dólar."
-
                         mensajes.append(
                             f"{emoji} <b>EUR/USD</b>\n{texto}\n"
                             f"Sesgo: <b>{sesgo}</b>\nProbabilidad aprox: <b>{prob}%</b>"
@@ -219,7 +230,6 @@ while True:
                             sesgo = "VENTA XAUUSD (Oro)"
                             emoji = "🟠"
                             texto = f"XAUUSD bajó <b>{abs(change_xau):.2f}%</b> → oro bajista."
-
                         mensajes.append(
                             f"{emoji} <b>XAUUSD (Oro)</b>\n{texto}\n"
                             f"Sesgo: <b>{sesgo}</b>\nProbabilidad aprox: <b>{prob}%</b>"
@@ -242,4 +252,4 @@ while True:
     except Exception as ex:
         print("Error general:", ex)
 
-    time.sleep(70)   # intervalo normal más suave
+    time.sleep(45)
