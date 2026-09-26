@@ -3,8 +3,8 @@ import time
 from datetime import datetime, timezone
 
 # ============ CONFIGURA AQUÍ ============
-TOKEN = "8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y" # ← pon tu token real
-CHAT_ID = "1669799682" # ← pon tu chat id real
+TOKEN = "8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y"          # ← pon tu token real
+CHAT_ID = "1669799682"                        # ← pon tu chat id real
 ALERT_MINUTES = 30
 MOVE_THRESHOLD_EUR = 0.15
 MOVE_THRESHOLD_XAU = 0.20
@@ -93,23 +93,27 @@ while True:
     try:
         r = requests.get(URL_CAL, timeout=15, headers=HEADERS)
 
-        # Protección contra respuesta vacía o no-JSON
+        # Protección contra errores y rate limit
         if r.status_code != 200:
             print(f"Calendario status {r.status_code}")
-            time.sleep(60)
+            if r.status_code == 429:
+                print("Rate limit (429). Esperando 3 minutos...")
+                time.sleep(180)
+            else:
+                time.sleep(90)
             continue
 
         if not r.text.strip():
-            print("Calendario devolvió respuesta vacía")
-            time.sleep(60)
+            print("Calendario devolvió respuesta vacía. Esperando...")
+            time.sleep(90)
             continue
 
         try:
             events = r.json()
         except Exception as e:
             print(f"Error parseando JSON del calendario: {e}")
-            print("Respuesta recibida (primeros 200 chars):", r.text[:200])
-            time.sleep(60)
+            print("Respuesta (primeros 200 chars):", r.text[:200])
+            time.sleep(90)
             continue
 
         now = datetime.now(timezone.utc)
@@ -238,4 +242,4 @@ while True:
     except Exception as ex:
         print("Error general:", ex)
 
-    time.sleep(45)
+    time.sleep(70)   # intervalo normal más suave
