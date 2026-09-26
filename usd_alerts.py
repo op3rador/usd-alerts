@@ -3,11 +3,11 @@ import time
 from datetime import datetime, timezone
 
 # ============ CONFIGURA AQUÍ ============
-TOKEN = "8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y"
-CHAT_ID = "1669799682"
+TOKEN = "8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y" # ← pon tu token real
+CHAT_ID = "1669799682" # ← pon tu chat id real
 ALERT_MINUTES = 30
-MOVE_THRESHOLD_EUR = 0.15      # % mínimo en EURUSD para señal
-MOVE_THRESHOLD_XAU = 0.20      # % mínimo en XAUUSD para señal (oro se mueve más)
+MOVE_THRESHOLD_EUR = 0.15
+MOVE_THRESHOLD_XAU = 0.20
 CHECK_AFTER_MIN = 5
 CHECK_WINDOW = 25
 # ========================================
@@ -16,9 +16,13 @@ URL_CAL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 URL_EUR = "https://open.er-api.com/v6/latest/USD"
 URL_XAU = "https://biquote.io/api/XAUUSD"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 sent_pre = set()
 sent_signal = set()
-price_at_event = {}   # key → {"eur": float, "xau": float}
+price_at_event = {}
 
 def send(msg):
     try:
@@ -32,21 +36,27 @@ def send(msg):
 
 def get_eurusd():
     try:
-        r = requests.get(URL_EUR, timeout=10)
+        r = requests.get(URL_EUR, timeout=10, headers=HEADERS)
+        if r.status_code != 200 or not r.text.strip():
+            return None
         return r.json()["rates"]["EUR"]
-    except:
+    except Exception as e:
+        print("Error EURUSD:", e)
         return None
 
 def get_xauusd():
     try:
-        r = requests.get(URL_XAU, timeout=10)
+        r = requests.get(URL_XAU, timeout=10, headers=HEADERS)
+        if r.status_code != 200 or not r.text.strip():
+            return None
         data = r.json()
         bid = float(data.get("bid", 0))
         ask = float(data.get("ask", 0))
         if bid > 0 and ask > 0:
             return (bid + ask) / 2
         return None
-    except:
+    except Exception as e:
+        print("Error XAUUSD:", e)
         return None
 
 def calcular_probabilidad(change_pct, threshold):
@@ -61,11 +71,9 @@ def calcular_probabilidad(change_pct, threshold):
         return 48
 
 def analizar_dato(actual, forecast, previous):
-    """Intenta interpretar Actual vs Forecast (si existen)"""
     if not actual or not forecast:
         return None
     try:
-        # Limpia símbolos comunes (%, K, M, etc.)
         a = float(str(actual).replace("%", "").replace("K", "").replace("M", "").replace(",", "").strip())
         f = float(str(forecast).replace("%", "").replace("K", "").replace("M", "").replace(",", "").strip())
         if a > f:
@@ -78,12 +86,32 @@ def analizar_dato(actual, forecast, previous):
         return None
 
 print("Bot USD High/Medium + EURUSD + XAUUSD iniciado...")
+send("✅ <b>Bot iniciado correctamente</b>\nMonitoreando High + Medium Impact USD\nEUR/USD + XAUUSD activos.")
 print("Esperando eventos...")
 
 while True:
     try:
-        r = requests.get(URL_CAL, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        events = r.json()
+        r = requests.get(URL_CAL, timeout=15, headers=HEADERS)
+
+        # Protección contra respuesta vacía o no-JSON
+        if r.status_code != 200:
+            print(f"Calendario status {r.status_code}")
+            time.sleep(60)
+            continue
+
+        if not r.text.strip():
+            print("Calendario devolvió respuesta vacía")
+            time.sleep(60)
+            continue
+
+        try:
+            events = r.json()
+        except Exception as e:
+            print(f"Error parseando JSON del calendario: {e}")
+            print("Respuesta recibida (primeros 200 chars):", r.text[:200])
+            time.sleep(60)
+            continue
+
         now = datetime.now(timezone.utc)
 
         for e in events:
@@ -124,7 +152,6 @@ while True:
             mins_after = -mins
             if CHECK_AFTER_MIN <= mins_after <= CHECK_WINDOW:
 
-                # Guardar precios de referencia la primera vez
                 if key not in price_at_event:
                     eur = get_eurusd()
                     xau = get_xauusd()
@@ -140,7 +167,6 @@ while True:
                 current_eur = get_eurusd()
                 current_xau = get_xauusd()
 
-                # --- Análisis del dato (si hay Actual) ---
                 analisis_dato = analizar_dato(actual, forecast, previous)
                 bloque_dato = ""
                 if analisis_dato:
@@ -157,63 +183,44 @@ while True:
 
                 mensajes = []
 
-                # ===== EUR/USD =====
+                # EUR/USD
                 if current_eur and ref.get("eur"):
                     change_eur = ((current_eur - ref["eur"]) / ref["eur"]) * 100
                     if abs(change_eur) >= MOVE_THRESHOLD_EUR:
                         prob = calcular_probabilidad(change_eur, MOVE_THRESHOLD_EUR)
-
                         if change_eur <= -MOVE_THRESHOLD_EUR:
                             sesgo = "COMPRA USD / VENTA EURUSD"
                             emoji = "🟢"
-                            texto = (
-                                f"EUR/USD bajó <b>{abs(change_eur):.2f}%</b> → "
-                                f"el mercado ve la noticia como <b>positiva para el dólar</b>."
-                            )
+                            texto = f"EUR/USD bajó <b>{abs(change_eur):.2f}%</b> → positivo para el dólar."
                         else:
                             sesgo = "VENTA USD / COMPRA EURUSD"
                             emoji = "🔴"
-                            texto = (
-                                f"EUR/USD subió <b>+{change_eur:.2f}%</b> → "
-                                f"el mercado ve la noticia como <b>negativa para el dólar</b>."
-                            )
+                            texto = f"EUR/USD subió <b>+{change_eur:.2f}%</b> → negativo para el dólar."
 
                         mensajes.append(
-                            f"{emoji} <b>EUR/USD</b>\n"
-                            f"{texto}\n"
-                            f"Sesgo: <b>{sesgo}</b>\n"
-                            f"Probabilidad aprox: <b>{prob}%</b>"
+                            f"{emoji} <b>EUR/USD</b>\n{texto}\n"
+                            f"Sesgo: <b>{sesgo}</b>\nProbabilidad aprox: <b>{prob}%</b>"
                         )
 
-                # ===== XAUUSD (Oro) =====
+                # XAUUSD
                 if current_xau and ref.get("xau"):
                     change_xau = ((current_xau - ref["xau"]) / ref["xau"]) * 100
                     if abs(change_xau) >= MOVE_THRESHOLD_XAU:
                         prob = calcular_probabilidad(change_xau, MOVE_THRESHOLD_XAU)
-
                         if change_xau >= MOVE_THRESHOLD_XAU:
                             sesgo = "COMPRA XAUUSD (Oro)"
                             emoji = "🟡"
-                            texto = (
-                                f"XAUUSD subió <b>+{change_xau:.2f}%</b> → "
-                                f"el oro reaccionó al alza (posible debilidad del USD o flight-to-safety)."
-                            )
+                            texto = f"XAUUSD subió <b>+{change_xau:.2f}%</b> → oro alcista."
                         else:
                             sesgo = "VENTA XAUUSD (Oro)"
                             emoji = "🟠"
-                            texto = (
-                                f"XAUUSD bajó <b>{abs(change_xau):.2f}%</b> → "
-                                f"el oro se debilita (suele ocurrir cuando el USD se fortalece)."
-                            )
+                            texto = f"XAUUSD bajó <b>{abs(change_xau):.2f}%</b> → oro bajista."
 
                         mensajes.append(
-                            f"{emoji} <b>XAUUSD (Oro)</b>\n"
-                            f"{texto}\n"
-                            f"Sesgo: <b>{sesgo}</b>\n"
-                            f"Probabilidad aprox: <b>{prob}%</b>"
+                            f"{emoji} <b>XAUUSD (Oro)</b>\n{texto}\n"
+                            f"Sesgo: <b>{sesgo}</b>\nProbabilidad aprox: <b>{prob}%</b>"
                         )
 
-                # Enviar solo si hubo al menos una señal
                 if mensajes:
                     cuerpo = "\n\n".join(mensajes)
                     msg_final = (
@@ -222,14 +229,13 @@ while True:
                         f"⏱ {int(mins_after)} min después del release\n\n"
                         f"{bloque_dato}"
                         f"{cuerpo}\n\n"
-                        f"⚠️ Solo es lectura de la reacción del precio. "
-                        f"Confirma siempre con tu análisis técnico."
+                        f"⚠️ Solo es lectura de la reacción del precio. Confirma con análisis técnico."
                     )
                     send(msg_final)
                     sent_signal.add(key)
                     print(f"Señal enviada: {title}")
 
     except Exception as ex:
-        print("Error:", ex)
+        print("Error general:", ex)
 
     time.sleep(45)
