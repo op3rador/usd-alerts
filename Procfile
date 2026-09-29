@@ -1,1 +1,1 @@
-worker: python usd_alerts.py
+worker: python bot_noticias.py
