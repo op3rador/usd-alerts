@@ -253,3 +253,206 @@ while True:
         print("Error general:", ex)
 
     time.sleep(45)
+
+def analizar_dato_profundo(title, actual, forecast, previous):
+    """
+    Análisis fundamental más profundo del dato.
+    Devuelve un texto completo listo para Telegram.
+    """
+    if not actual or not forecast:
+        return None
+
+    try:
+        a = float(str(actual).replace("%", "").replace("K", "").replace("M", "").replace(",", "").replace("B", "").strip())
+        f = float(str(forecast).replace("%", "").replace("K", "").replace("M", "").replace(",", "").replace("B", "").strip())
+        p = float(str(previous).replace("%", "").replace("K", "").replace("M", "").replace(",", "").replace("B", "").strip()) if previous and previous != "—" else None
+    except:
+        return None
+
+    diferencia = a - f
+    porcentaje_sorpresa = (diferencia / abs(f)) * 100 if f != 0 else 0
+
+    # Determinamos dirección del sesgo
+    if a > f:
+        sesgo_dato = "alcista"
+        fuerza = "fuerte" if abs(porcentaje_sorpresa) > 5 else "moderada" if abs(porcentaje_sorpresa) > 2 else "leve"
+        emoji_dato = "🟢"
+        texto_sorpresa = f"El dato salió **mejor** de lo esperado (Actual {actual} vs Forecast {forecast})"
+    elif a < f:
+        sesgo_dato = "bajista"
+        fuerza = "fuerte" if abs(porcentaje_sorpresa) > 5 else "moderada" if abs(porcentaje_sorpresa) > 2 else "leve"
+        emoji_dato = "🔴"
+        texto_sorpresa = f"El dato salió **peor** de lo esperado (Actual {actual} vs Forecast {forecast})"
+    else:
+        sesgo_dato = "neutral"
+        fuerza = "nula"
+        emoji_dato = "⚪"
+        texto_sorpresa = f"El dato salió **en línea** con el Forecast ({actual})"
+
+    # Análisis específico por tipo de noticia
+    titulo_lower = title.lower()
+
+    if "jolts" in titulo_lower or "job openings" in titulo_lower:
+        contexto = (
+            "📌 <b>JOLTS Job Openings</b> mide la demanda de empleo.\n"
+            "• Dato fuerte → Mercado laboral tenso → Más presión inflacionaria → Fed más hawkish → USD alcista\n"
+            "• Dato débil → Enfriamiento del mercado laboral → Posible Fed más dovish → USD bajista"
+        )
+        if sesgo_dato == "alcista":
+            impacto = "Soporta un escenario de tasas altas por más tiempo."
+        elif sesgo_dato == "bajista":
+            impacto = "Aumenta las probabilidades de que la Fed sea más cautelosa / dovish."
+        else:
+            impacto = "No cambia significativamente las expectativas de la Fed."
+
+    elif "consumer confidence" in titulo_lower or "confianza del consumidor" in titulo_lower:
+        contexto = (
+            "📌 <b>Consumer Confidence</b> mide el optimismo del consumidor estadounidense.\n"
+            "• Dato fuerte → Consumo robusto → Economía fuerte → USD positivo\n"
+            "• Dato débil → Posible enfriamiento del consumo → Presión bajista para el USD"
+        )
+        if sesgo_dato == "alcista":
+            impacto = "Refuerza la idea de resiliencia económica de EE.UU."
+        elif sesgo_dato == "bajista":
+            impacto = "Genera dudas sobre la fortaleza del consumidor y el crecimiento."
+        else:
+            impacto = "Impacto limitado en expectativas de política monetaria."
+
+    elif "hpi" in titulo_lower or "house price" in titulo_lower or "case-shiller" in titulo_lower:
+        contexto = (
+            "📌 Precios de vivienda. Impacto generalmente moderado.\n"
+            "Datos fuertes suelen ser ligeramente positivos para el USD (riqueza del consumidor)."
+        )
+        impacto = "Impacto secundario. Suele ser menos prioritario que empleo o inflación."
+
+    else:
+        # Genérico para otros datos USD
+        contexto = "📌 Dato económico de EE.UU. relevante para el dólar."
+        if sesgo_dato == "alcista":
+            impacto = "Soporta un sesgo alcista para el USD."
+        elif sesgo_dato == "bajista":
+            impacto = "Soporta un sesgo bajista para el USD."
+        else:
+            impacto = "Impacto neutral."
+
+    # Texto final del análisis fundamental
+    analisis = (
+        f"{emoji_dato} <b>Análisis del Dato:</b>\n"
+        f"{texto_sorpresa}\n"
+        f"Sorpresa: <b>{fuerza}</b> ({porcentaje_sorpresa:+.1f}%)\n\n"
+        f"{contexto}\n\n"
+        f"<b>Implicación:</b> {impacto}"
+    )
+
+    return analisis, sesgo_dato, fuerza
+
+def calcular_probabilidad_mejorada(change_pct, threshold, fuerza_dato):
+    """Probabilidad más realista combinando movimiento de precio + fuerza del dato"""
+    fuerza_precio = abs(change_pct)
+
+    base = 48
+    if fuerza_precio >= threshold * 2.5:
+        base = 75
+    elif fuerza_precio >= threshold * 1.8:
+        base = 68
+    elif fuerza_precio >= threshold * 1.3:
+        base = 60
+    elif fuerza_precio >= threshold:
+        base = 55
+
+    # Bonus / penalización por fuerza del dato
+    if fuerza_dato == "fuerte":
+        base += 8
+    elif fuerza_dato == "moderada":
+        base += 4
+    elif fuerza_dato == "leve":
+        base += 1
+
+    return min(base, 85)  # Máximo 85% para no generar falsa confianza
+
+# ========== DENTRO DEL LOOP (reemplaza la parte de mensajes) ==========
+
+# ... (después de obtener current_eur y current_xau)
+
+analisis_result = analizar_dato_profundo(title, actual, forecast, previous)
+
+bloque_dato = ""
+sesgo_dato = "neutral"
+fuerza_dato = "nula"
+
+if analisis_result:
+    bloque_dato, sesgo_dato, fuerza_dato = analisis_result
+    bloque_dato += "\n\n"
+
+mensajes = []
+
+# ----- EUR/USD -----
+if current_eur and ref.get("eur"):
+    change_eur = ((current_eur - ref["eur"]) / ref["eur"]) * 100
+    if abs(change_eur) >= MOVE_THRESHOLD_EUR:
+        prob = calcular_probabilidad_mejorada(change_eur, MOVE_THRESHOLD_EUR, fuerza_dato)
+
+        if change_eur <= -MOVE_THRESHOLD_EUR:
+            sesgo = "COMPRA USD / VENTA EURUSD"
+            emoji = "🟢"
+            texto = f"EUR/USD bajó <b>{abs(change_eur):.2f}%</b> → reacción positiva para el dólar."
+            consejo = "Busca ventas en pullbacks a zonas de resistencia (si el técnico confirma)."
+        else:
+            sesgo = "VENTA USD / COMPRA EURUSD"
+            emoji = "🔴"
+            texto = f"EUR/USD subió <b>+{change_eur:.2f}%</b> → reacción negativa para el dólar."
+            consejo = "Busca compras en pullbacks a zonas de soporte (si el técnico confirma)."
+
+        mensajes.append(
+            f"{emoji} <b>EUR/USD</b>\n"
+            f"{texto}\n"
+            f"Sesgo: <b>{sesgo}</b>\n"
+            f"Probabilidad aprox: <b>{prob}%</b>\n"
+            f"💡 {consejo}"
+        )
+
+# ----- XAUUSD -----
+if current_xau and ref.get("xau"):
+    change_xau = ((current_xau - ref["xau"]) / ref["xau"]) * 100
+    if abs(change_xau) >= MOVE_THRESHOLD_XAU:
+        prob = calcular_probabilidad_mejorada(change_xau, MOVE_THRESHOLD_XAU, fuerza_dato)
+
+        if change_xau >= MOVE_THRESHOLD_XAU:
+            sesgo = "COMPRA XAUUSD (Oro)"
+            emoji = "🟡"
+            texto = f"XAUUSD subió <b>+{change_xau:.2f}%</b> → oro alcista."
+            consejo = "Busca compras en retrocesos a soportes clave."
+        else:
+            sesgo = "VENTA XAUUSD (Oro)"
+            emoji = "🟠"
+            texto = f"XAUUSD bajó <b>{abs(change_xau):.2f}%</b> → oro bajista."
+            consejo = "Busca ventas en rebotes a resistencias."
+
+        mensajes.append(
+            f"{emoji} <b>XAUUSD (Oro)</b>\n"
+            f"{texto}\n"
+            f"Sesgo: <b>{sesgo}</b>\n"
+            f"Probabilidad aprox: <b>{prob}%</b>\n"
+            f"💡 {consejo}"
+        )
+
+if mensajes:
+    cuerpo = "\n\n".join(mensajes)
+
+    # Mensaje final más completo
+    msg_final = (
+        f"📊 <b>ANÁLISIS POST-NOTICIA PROFUNDO</b>\n\n"
+        f"📌 Evento: <b>{title}</b> ({impact})\n"
+        f"⏱ {int(mins_after)} min después del release\n\n"
+        f"{bloque_dato}"
+        f"{cuerpo}\n\n"
+        f"⚠️ <b>Importante:</b>\n"
+        f"• Este es solo el sesgo fundamental de la reacción inicial.\n"
+        f"• Combínalo siempre con tu análisis técnico (estructura, zonas, momentum).\n"
+        f"• Cuidado con 'Buy the rumor, Sell the news'.\n"
+        f"• Espera confirmación en M5/M15 antes de entrar."
+    )
+
+    send(msg_final)
+    sent_signal.add(key)
+    print(f"Señal enviada: {title}")
