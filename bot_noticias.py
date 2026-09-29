@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 
 # ============ CONFIGURACIÓN ============
 # En Railway: Variables -> TOKEN y CHAT_ID (no escribas el token en el código)
-TOKEN = os.environ.get("8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y", "")
-CHAT_ID = os.environ.get("1669799682", "")
+TOKEN = os.environ.get"8941710007:AAHb02MS7IF8GX3gkVuF9X83sMND6QXMk7Y"
+CHAT_ID = os.environ.get"1669799682"
 
 ALERT_MINUTES = 30            # aviso previo
 MOVE_THRESHOLD_EUR = 0.15     # % mínimo de movimiento en EUR/USD
