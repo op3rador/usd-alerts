@@ -3,7 +3,7 @@ import time
 import json
 import html
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ============ CONFIGURACIÓN ============
@@ -15,18 +15,19 @@ MOVE_THRESHOLD_EUR = 0.15
 MOVE_THRESHOLD_XAU = 0.20
 CHECK_AFTER_MIN = 2
 CHECK_WINDOW = 25
-MAX_SIGNALS_PER_EVENT = 2          # permite 2 evaluaciones por noticia
-CALENDAR_CACHE_SECONDS = 180       # 3 min
-RATE_LIMIT_WAIT = 600
-STATE_FILE = Path("bot_state.json")  # persistencia
+MAX_SIGNALS_PER_EVENT = 2
+CALENDAR_CACHE_SECONDS = 300          # 5 min en condiciones normales
+CALENDAR_CACHE_ON_429 = 900           # 15 min si recibimos rate-limit
+STATE_FILE = Path("bot_state.json")
 
-# Forex Factory (feed oficial de la comunidad)
+# Forex Factory (feed de la comunidad)
 URL_FF_THIS = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 URL_FF_NEXT = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
 }
 
 INVERSE_KEYWORDS = [
@@ -56,13 +57,14 @@ CONTEXTOS = [
      "📌 <b>Precios de vivienda</b>: impacto normalmente moderado/secundario."),
 ]
 
-# ============ ESTADO PERSISTENTE ============
+# ============ ESTADO ============
 events_cache = []
 last_calendar_fetch = 0
+calendar_cooldown_until = 0          # timestamp hasta el que no pedimos calendario
 calendar_fail_count = 0
 sent_pre = set()
-sent_signal = {}          # key -> contador de señales enviadas
-refs = {}                 # key -> {"eur": float|None, "xau": (precio, fuente)|None, "tarde": bool, "captured_at": ts}
+sent_signal = {}
+refs = {}
 
 def load_state():
     global sent_pre, sent_signal, refs
@@ -79,7 +81,6 @@ def load_state():
 
 def save_state():
     try:
-        # Limpiar refs muy antiguas (> 6 h)
         now_ts = time.time()
         clean_refs = {
             k: v for k, v in refs.items()
@@ -97,7 +98,7 @@ def save_state():
 # ============ TELEGRAM ============
 def send(msg: str):
     if not TOKEN or not CHAT_ID:
-        print("Sin TOKEN/CHAT_ID, mensaje no enviado")
+        print("Sin TOKEN/CHAT_ID")
         return
     try:
         r = requests.post(
@@ -139,14 +140,15 @@ def get_xauusd():
         r = requests.get("https://biquote.io/api/XAUUSD", headers=HEADERS, timeout=10)
         if r.status_code == 200 and r.text.strip():
             d = r.json()
-            bid, ask = float(d.get("bid", 0)), float(d.get("ask", 0))
+            bid = float(d.get("bid", 0))
+            ask = float(d.get("ask", 0))
             if bid > 0 and ask > 0:
                 return ((bid + ask) / 2, "biquote")
     except Exception as e:
         print("Error XAUUSD biquote:", e)
     return None
 
-# ============ ANÁLISIS DEL DATO ============
+# ============ ANÁLISIS ============
 def parse_num(s):
     if s is None:
         return None
@@ -217,25 +219,42 @@ def confianza(change_pct, threshold, fuerza_dato, alineado):
         base -= 8
     return max(40, min(base, 85))
 
-# ============ CALENDARIO (Forex Factory) ============
+# ============ CALENDARIO (sin sleep largo) ============
 def refrescar_calendario():
-    """Actualiza events_cache desde Forex Factory. Devuelve False si hay que saltar el ciclo."""
-    global events_cache, last_calendar_fetch, calendar_fail_count
+    """
+    Actualiza events_cache desde Forex Factory.
+    NUNCA hace sleep largo: usa cooldown para no spamear el endpoint.
+    Devuelve True si hay datos usables (aunque sean de caché).
+    """
+    global events_cache, last_calendar_fetch, calendar_cooldown_until, calendar_fail_count
     now_ts = time.time()
+
+    # Si estamos en cooldown por 429, usamos caché si existe
+    if now_ts < calendar_cooldown_until:
+        if events_cache:
+            return True
+        return False
+
+    # Caché normal todavía válida
     if events_cache and now_ts - last_calendar_fetch <= CALENDAR_CACHE_SECONDS:
         return True
 
+    got_data = False
+    hit_429 = False
+
     for url in (URL_FF_THIS, URL_FF_NEXT):
         try:
-            r = requests.get(url, timeout=15, headers=HEADERS)
+            r = requests.get(url, timeout=12, headers=HEADERS)
         except Exception as e:
-            print(f"Error pidiendo calendario {url}:", e)
+            print(f"Error red calendario {url}: {e}")
             continue
 
         if r.status_code == 429:
-            print("Rate limit (429). Esperando 10 minutos...")
-            time.sleep(RATE_LIMIT_WAIT)
-            return False
+            print("Rate limit (429) detectado. Activando cooldown 15 min (sin bloquear el bot).")
+            hit_429 = True
+            calendar_cooldown_until = now_ts + CALENDAR_CACHE_ON_429
+            # NO hacemos time.sleep aquí → el bot sigue vivo
+            break
 
         if r.status_code != 200 or not r.text.strip():
             print(f"Calendario status {r.status_code} → {url}")
@@ -245,29 +264,37 @@ def refrescar_calendario():
             data = r.json()
             if not isinstance(data, list):
                 continue
-            # Combinar thisweek + nextweek sin duplicados
-            existing_keys = {e.get("title", "") + "|" + e.get("date", "") for e in events_cache}
+
+            existing = {e.get("title", "") + "|" + e.get("date", "") for e in events_cache}
             nuevos = 0
             for e in data:
                 key = e.get("title", "") + "|" + e.get("date", "")
-                if key not in existing_keys:
+                if key not in existing:
                     events_cache.append(e)
-                    existing_keys.add(key)
+                    existing.add(key)
                     nuevos += 1
+
             last_calendar_fetch = now_ts
             calendar_fail_count = 0
-            print(f"Calendario FF actualizado → total {len(events_cache)} eventos (+{nuevos})")
-            return True
+            got_data = True
+            print(f"Calendario FF actualizado → {len(events_cache)} eventos (+{nuevos})")
+            if url == URL_FF_THIS:
+                break
         except Exception as e:
-            print("Error parseando calendario:", e, "|", r.text[:150])
+            print("Error parseando calendario:", e)
             continue
 
-    calendar_fail_count += 1
-    if calendar_fail_count >= 3:
-        send("⚠️ <b>Bot:</b> no pude actualizar el calendario de Forex Factory (3 fallos seguidos).")
-        calendar_fail_count = 0
-    time.sleep(60)
-    return False
+    if hit_429:
+        return bool(events_cache)
+
+    if not got_data:
+        calendar_fail_count += 1
+        if calendar_fail_count >= 4:
+            send("⚠️ <b>Bot:</b> no pude actualizar el calendario de Forex Factory (varios fallos). Usaré la última caché si existe.")
+            calendar_fail_count = 0
+        return bool(events_cache)
+
+    return True
 
 # ============ LÓGICA POR EVENTO ============
 def alerta_previa(key, title, impact, forecast, previous, mins):
@@ -288,22 +315,17 @@ def alerta_previa(key, title, impact, forecast, previous, mins):
     print(f"Alerta previa ({impact}): {title}")
 
 def capturar_referencia(key, mins):
-    """
-    Empieza a muestrear ~3 min antes del release.
-    Guarda el último precio válido justo antes (o el más cercano posible).
-    """
     mins_after = -mins
     if mins > 3.5 or mins_after > CHECK_WINDOW:
         return
     if key in refs and not refs[key].get("tarde", True):
-        # ya tenemos una referencia buena (tomada antes del release)
         return
 
     eur, xau = get_eurusd(), get_xauusd()
     if not (eur or xau):
         return
 
-    tarde = mins_after > 0.8   # si ya pasó más de ~50 s del release
+    tarde = mins_after > 0.8
     refs[key] = {
         "eur": eur,
         "xau": xau,
@@ -323,8 +345,6 @@ def evaluar_reaccion(key, title, impact, actual, forecast, previous, mins):
     count = sent_signal.get(key, 0)
     if count >= MAX_SIGNALS_PER_EVENT:
         return
-
-    # Evitar señales demasiado seguidas (mínimo 6 min entre ellas)
     if count >= 1 and mins_after < 10:
         return
 
@@ -340,7 +360,6 @@ def evaluar_reaccion(key, title, impact, actual, forecast, previous, mins):
 
     mensajes = []
 
-    # ----- EUR/USD -----
     cur_eur = get_eurusd()
     if cur_eur and ref.get("eur"):
         ch = (cur_eur - ref["eur"]) / ref["eur"] * 100
@@ -362,7 +381,6 @@ def evaluar_reaccion(key, title, impact, actual, forecast, previous, mins):
                 f"Confianza (heurística): <b>{conf}%</b>{aviso}\n💡 {consejo}"
             )
 
-    # ----- XAUUSD -----
     cur_xau = get_xauusd()
     ref_xau = ref.get("xau")
     if cur_xau and ref_xau and cur_xau[1] == ref_xau[1]:
@@ -389,8 +407,7 @@ def evaluar_reaccion(key, title, impact, actual, forecast, previous, mins):
         return
 
     nota_tarde = (
-        "\n⚠️ El bot arrancó tarde: la referencia se tomó después del release, "
-        "el movimiento inicial pudo perderse."
+        "\n⚠️ El bot arrancó tarde: la referencia se tomó después del release."
         if ref.get("tarde") else ""
     )
 
@@ -403,7 +420,7 @@ def evaluar_reaccion(key, title, impact, actual, forecast, previous, mins):
         + "\n\n".join(mensajes)
         + "\n\n⚠️ <b>Importante:</b>\n"
           "• Es solo el sesgo de la reacción inicial, no una señal de entrada.\n"
-          "• Combínalo con tu análisis técnico (estructura, zonas, momentum).\n"
+          "• Combínalo con tu análisis técnico.\n"
           "• Cuidado con 'Buy the rumor, sell the news'.\n"
           "• Espera confirmación en M5/M15 antes de entrar."
     )
@@ -412,10 +429,8 @@ def evaluar_reaccion(key, title, impact, actual, forecast, previous, mins):
     save_state()
     print(f"Señal #{count + 1} enviada: {title}")
 
-# ============ POLLING ADAPTATIVO ============
 def get_sleep_seconds(now: datetime) -> int:
-    """Más rápido cerca de eventos, más lento cuando no hay nada."""
-    nearest = 9999
+    nearest = 9999.0
     for e in events_cache:
         if e.get("country") != "USD" or e.get("impact") not in ("High", "Medium"):
             continue
@@ -434,8 +449,8 @@ def get_sleep_seconds(now: datetime) -> int:
     if nearest <= 15:
         return 12
     if nearest <= 40:
-        return 20
-    return 55
+        return 25
+    return 50
 
 # ============ MAIN ============
 def main():
@@ -454,8 +469,10 @@ def main():
 
     while True:
         try:
-            if not refrescar_calendario():
-                time.sleep(30)
+            usable = refrescar_calendario()
+            if not usable and not events_cache:
+                print("Sin datos de calendario aún. Reintento en 40 s...")
+                time.sleep(40)
                 continue
 
             now = datetime.now(timezone.utc)
@@ -490,7 +507,7 @@ def main():
 
         except Exception as ex:
             print("Error general:", ex)
-            time.sleep(30)
+            time.sleep(25)
 
 if __name__ == "__main__":
     main()
